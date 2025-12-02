@@ -31,15 +31,17 @@
             },
             "iterations": {
               "type": "number",
-              "description": "Number of optimization loops to run. Each loop runs 5 subagents in parallel, analyzes results, and improves prompts. Default is 20.",
-              "default": 20
+              "description": "Number of optimization loops to run. Each loop runs 5 subagents in parallel, analyzes results, and improves prompts. Default is 3.",
+              "default": 3
             },
             "context": {
               "type": "string",
               "description": "Optional additional context to provide to the subagents."
             }
           },
-          "required": ["task"]
+          "required": [
+            "task"
+          ]
         },
         "userDescription": "Runs multiple AI subagents in parallel with different prompts, analyzes which produces the best results, and iteratively optimizes the prompts to find the most effective approach."
       }
@@ -52,11 +54,12 @@
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {
+    "@types/node": "^22.19.1",
     "@types/vscode": "^1.100.0",
-    "@types/node": "22.x",
     "@typescript-eslint/eslint-plugin": "^8.28.0",
     "@typescript-eslint/parser": "^8.28.0",
     "eslint": "^9.23.0",
-    "typescript": "^5.8.2"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }
