@@ -1,0 +1,62 @@
+{
+  "name": "subagent-prompt-optimizer",
+  "displayName": "Subagent Prompt Optimizer",
+  "description": "VS Code extension that uses multiple subagents to find optimal prompts through iterative analysis",
+  "version": "0.0.1",
+  "publisher": "your-publisher",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languageModelTools": [
+      {
+        "name": "optimize_prompt_with_subagents",
+        "displayName": "Optimize Prompt with Subagents",
+        "modelDescription": "This tool delegates a task to multiple subagents running in parallel, each with slightly different prompts. It then analyzes the results to determine which approach produced the best outcome, learns from the analysis, and iteratively improves the prompts. Use this tool when you want to find the optimal way to prompt an AI for a specific task through experimentation and analysis.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "promptOptimizer",
+        "icon": "$(sparkle)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "The main task or question that should be delegated to subagents for processing. This is the core request that will be sent with different prompt variations."
+            },
+            "iterations": {
+              "type": "number",
+              "description": "Number of optimization loops to run. Each loop runs 5 subagents in parallel, analyzes results, and improves prompts. Default is 20.",
+              "default": 20
+            },
+            "context": {
+              "type": "string",
+              "description": "Optional additional context to provide to the subagents."
+            }
+          },
+          "required": ["task"]
+        },
+        "userDescription": "Runs multiple AI subagents in parallel with different prompts, analyzes which produces the best results, and iteratively optimizes the prompts to find the most effective approach."
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.100.0",
+    "@types/node": "22.x",
+    "@typescript-eslint/eslint-plugin": "^8.28.0",
+    "@typescript-eslint/parser": "^8.28.0",
+    "eslint": "^9.23.0",
+    "typescript": "^5.8.2"
+  }
+}
