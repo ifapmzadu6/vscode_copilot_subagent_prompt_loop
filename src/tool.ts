@@ -71,12 +71,18 @@ const PROMPT_VARIATION_TEMPLATES = [
  */
 export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPromptOptimizerParameters> {
     
+    private outputChannel: vscode.OutputChannel;
+
+    constructor() {
+        this.outputChannel = vscode.window.createOutputChannel('Subagent Prompt Optimizer');
+    }
+
     private log(message: string, data?: unknown): void {
         const timestamp = new Date().toISOString();
+        const logMsg = `[${timestamp}] ${message}`;
+        this.outputChannel.appendLine(logMsg);
         if (data !== undefined) {
-            console.log(`[SubagentOptimizer ${timestamp}] ${message}`, data);
-        } else {
-            console.log(`[SubagentOptimizer ${timestamp}] ${message}`);
+            this.outputChannel.appendLine(JSON.stringify(data, null, 2));
         }
     }
 
@@ -113,8 +119,9 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
         options: vscode.LanguageModelToolInvocationOptions<IPromptOptimizerParameters>,
         token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        const { task, iterations = 20, context } = options.input;
+        const { task, iterations = 3, context } = options.input;
         
+        this.outputChannel.show(true);
         this.log('=== Starting Prompt Optimization ===');
         this.log('Task:', task);
         this.log('Iterations:', iterations);
@@ -143,7 +150,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
                 task,
                 context,
                 currentPromptVariations,
-                options.toolInvocationToken,
                 token
             );
             
@@ -158,7 +164,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const analysis = await this.analyzeResults(
                 task,
                 results,
-                options.toolInvocationToken,
                 token
             );
             
@@ -196,13 +201,48 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
-     * Run 5 subagents in parallel using vscode.lm.invokeTool('runSubagent')
+     * Call the Language Model directly
+     */
+    private async callLLM(
+        prompt: string,
+        token: vscode.CancellationToken
+    ): Promise<string> {
+        try {
+            // Select a chat model, preferring gpt-4 class models
+            let models = await vscode.lm.selectChatModels({ family: 'gpt-4' });
+
+            // Fallback if no specific family found
+            if (!models || models.length === 0) {
+                models = await vscode.lm.selectChatModels({});
+            }
+
+            if (!models || models.length === 0) {
+                throw new Error('No language models available in VS Code.');
+            }
+
+            const model = models[0];
+            const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+
+            const response = await model.sendRequest(messages, {}, token);
+
+            let text = '';
+            for await (const fragment of response.text) {
+                text += fragment;
+            }
+            return text;
+        } catch (error) {
+            this.log('Error calling LLM:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Run 5 subagents in parallel
      */
     private async runSubagentsInParallel(
         task: string,
         context: string | undefined,
         promptVariations: typeof PROMPT_VARIATION_TEMPLATES,
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<SubagentResult[]> {
         
@@ -215,26 +255,10 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const startTime = Date.now();
             
             try {
-                // Use lm.invokeTool to call the runSubagent tool
-                // Pass toolInvocationToken to show progress in chat UI
-                const result = await vscode.lm.invokeTool(
-                    'runSubagent',
-                    {
-                        input: {
-                            prompt: fullPrompt,
-                            description: `Subagent ${index + 1}: ${variation.name} approach`
-                        },
-                        toolInvocationToken
-                    },
-                    token
-                );
-
-                // Extract text from the result
-                const resultText = this.extractTextFromResult(result);
+                const resultText = await this.callLLM(fullPrompt, token);
                 const duration = Date.now() - startTime;
                 
                 this.log(`Subagent ${index + 1} (${variation.name}) completed in ${duration}ms`);
-                this.log(`Subagent ${index + 1} result preview: ${resultText.substring(0, 200)}...`);
                 
                 return {
                     promptVariation: variation.name,
@@ -268,7 +292,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     private async analyzeResults(
         originalTask: string,
         results: SubagentResult[],
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<AnalysisResult> {
         
@@ -305,20 +328,7 @@ Consider:
         const startTime = Date.now();
 
         try {
-            // Pass toolInvocationToken to show progress in chat UI
-            const analysisResult = await vscode.lm.invokeTool(
-                'runSubagent',
-                {
-                    input: {
-                        prompt: analysisPrompt,
-                        description: 'Analysis subagent: Evaluating results'
-                    },
-                    toolInvocationToken
-                },
-                token
-            );
-
-            const analysisText = this.extractTextFromResult(analysisResult);
+            const analysisText = await this.callLLM(analysisPrompt, token);
             const duration = Date.now() - startTime;
             
             this.log(`Analysis subagent completed in ${duration}ms`);
@@ -327,7 +337,14 @@ Consider:
             // Try to parse the JSON response
             try {
                 // Extract JSON from the response (handle cases where there's extra text)
-                const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+                // Also handle markdown code blocks which LLMs frequently use
+                let cleanText = analysisText;
+                const codeBlockMatch = analysisText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+                if (codeBlockMatch) {
+                    cleanText = codeBlockMatch[1];
+                }
+
+                const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]) as AnalysisResult;
                     this.log('Successfully parsed analysis JSON:', parsed);
@@ -373,12 +390,24 @@ Consider:
                 return variation;
             }
 
+            // Determine new name
+            let newName = variation.name;
+            const optimizedMatch = newName.match(/(.*) \(Optimized(?: v(\d+))?\)$/);
+
+            if (optimizedMatch) {
+                const baseName = optimizedMatch[1];
+                const version = optimizedMatch[2] ? parseInt(optimizedMatch[2]) : 1;
+                newName = `${baseName} (Optimized v${version + 1})`;
+            } else {
+                newName = `${newName} (Optimized)`;
+            }
+
             // Incorporate learnings from analysis
             const improvements = analysis.promptImprovements.join(' ');
             const suggestions = analysis.nextPromptSuggestions.join(' ');
             
             return {
-                name: `${variation.name} (Optimized)`,
+                name: newName,
                 template: (task: string, context?: string) => {
                     const basePrompt = variation.template(task, context);
                     return `${basePrompt}\n\nAdditional guidance based on previous analysis:\n- ${improvements}\n- ${suggestions}\n\nInspired by successful approach: ${bestVariation.name}`;
@@ -388,21 +417,6 @@ Consider:
 
         this.log('New variation names:', newVariations.map(v => v.name));
         return newVariations;
-    }
-
-    /**
-     * Extract text content from a LanguageModelToolResult
-     */
-    private extractTextFromResult(result: vscode.LanguageModelToolResult): string {
-        const textParts: string[] = [];
-        
-        for (const part of result.content) {
-            if (part instanceof vscode.LanguageModelTextPart) {
-                textParts.push(part.value);
-            }
-        }
-        
-        return textParts.join('\n');
     }
 
     /**
