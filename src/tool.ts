@@ -38,27 +38,32 @@ const PROMPT_VARIATION_TEMPLATES = [
     {
         name: "Direct",
         template: (task: string, context?: string) => 
-            `${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nPlease complete this task directly and concisely.`
+            `You are a Direct Subagent. Your goal is to provide a concise and immediate answer.
+${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nComplete this task directly without unnecessary elaboration.`
     },
     {
         name: "Step-by-Step",
         template: (task: string, context?: string) =>
-            `${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nPlease approach this task step-by-step:\n1. First, understand what is being asked\n2. Break down the problem\n3. Execute each step\n4. Verify your solution`
+            `You are a Step-by-Step Subagent. Your goal is to break down the task logically.
+${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nApproach this task step-by-step:\n1. Understand the goal\n2. Break it into smaller parts\n3. Execute each part systematically\n4. Verify the final result`
     },
     {
         name: "Expert Role",
         template: (task: string, context?: string) =>
-            `${context ? `Context: ${context}\n\n` : ''}You are an expert in this domain. Your task: ${task}\n\nAs an expert, provide a thorough and professional response.`
+            `You are an Expert Subagent. Your goal is to provide high-quality, professional insights.
+${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nAct as a leading expert in this field. Provide a comprehensive, nuanced, and professional response.`
     },
     {
         name: "Structured Output",
         template: (task: string, context?: string) =>
-            `${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nPlease structure your response as follows:\n- Summary\n- Details\n- Recommendations (if applicable)\n- Conclusion`
+            `You are a Structured Subagent. Your goal is to organize information clearly.
+${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nStructure your response clearly (e.g., using headings, bullet points, tables). format:\n- Executive Summary\n- Detailed Analysis\n- Key Takeaways\n- Conclusion`
     },
     {
         name: "Critical Thinking",
         template: (task: string, context?: string) =>
-            `${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nBefore responding:\n1. Consider multiple approaches\n2. Evaluate potential issues\n3. Choose the best approach\n4. Explain your reasoning`
+            `You are a Critical Thinking Subagent. Your goal is to evaluate the task from multiple angles.
+${context ? `Context: ${context}\n\n` : ''}Task: ${task}\n\nBefore finalizing your answer:\n1. Analyze potential pitfalls\n2. Consider alternative perspectives\n3. Justify your chosen approach\n4. Provide the best possible solution with reasoning`
     }
 ];
 
@@ -143,7 +148,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
                 task,
                 context,
                 currentPromptVariations,
-                options.toolInvocationToken,
                 token
             );
             
@@ -158,7 +162,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const analysis = await this.analyzeResults(
                 task,
                 results,
-                options.toolInvocationToken,
                 token
             );
             
@@ -196,16 +199,22 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
-     * Run 5 subagents in parallel using vscode.lm.invokeTool('runSubagent')
+     * Run 5 subagents in parallel using vscode.lm.selectChatModels
      */
     private async runSubagentsInParallel(
         task: string,
         context: string | undefined,
         promptVariations: typeof PROMPT_VARIATION_TEMPLATES,
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<SubagentResult[]> {
         
+        const models = await vscode.lm.selectChatModels({ family: 'gpt-4' });
+        const model = models[0];
+
+        if (!model) {
+             this.log('No GPT-4 model found, falling back to any available model');
+        }
+
         // Create 5 parallel subagent invocations
         const subagentPromises = promptVariations.map(async (variation, index) => {
             const basePrompt = variation.template(task, context);
@@ -215,22 +224,9 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const startTime = Date.now();
             
             try {
-                // Use lm.invokeTool to call the runSubagent tool
-                // Pass toolInvocationToken to show progress in chat UI
-                const result = await vscode.lm.invokeTool(
-                    'runSubagent',
-                    {
-                        input: {
-                            prompt: fullPrompt,
-                            description: `Subagent ${index + 1}: ${variation.name} approach`
-                        },
-                        toolInvocationToken
-                    },
-                    token
-                );
+                // Use model.sendRequest instead of invokeTool
+                const resultText = await this.sendModelRequest(model, fullPrompt, token);
 
-                // Extract text from the result
-                const resultText = this.extractTextFromResult(result);
                 const duration = Date.now() - startTime;
                 
                 this.log(`Subagent ${index + 1} (${variation.name}) completed in ${duration}ms`);
@@ -263,12 +259,41 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
+     * Helper to send a request to the language model
+     */
+    private async sendModelRequest(
+        model: vscode.LanguageModelChat | undefined,
+        prompt: string,
+        token: vscode.CancellationToken
+    ): Promise<string> {
+        // If no model was passed (none found in family), try finding any model
+        if (!model) {
+            const models = await vscode.lm.selectChatModels({});
+            model = models[0];
+            if (!model) {
+                throw new Error("No language models available.");
+            }
+        }
+
+        const messages = [
+            vscode.LanguageModelChatMessage.User(prompt)
+        ];
+
+        const response = await model.sendRequest(messages, {}, token);
+
+        let text = '';
+        for await (const fragment of response.text) {
+            text += fragment;
+        }
+        return text;
+    }
+
+    /**
      * Analyze the results from all subagents using another subagent
      */
     private async analyzeResults(
         originalTask: string,
         results: SubagentResult[],
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<AnalysisResult> {
         
@@ -305,20 +330,11 @@ Consider:
         const startTime = Date.now();
 
         try {
-            // Pass toolInvocationToken to show progress in chat UI
-            const analysisResult = await vscode.lm.invokeTool(
-                'runSubagent',
-                {
-                    input: {
-                        prompt: analysisPrompt,
-                        description: 'Analysis subagent: Evaluating results'
-                    },
-                    toolInvocationToken
-                },
-                token
-            );
+            // Use model.sendRequest for analysis too
+            const models = await vscode.lm.selectChatModels({ family: 'gpt-4' });
+            // Fallback if needed inside sendModelRequest
+            const analysisText = await this.sendModelRequest(models[0], analysisPrompt, token);
 
-            const analysisText = this.extractTextFromResult(analysisResult);
             const duration = Date.now() - startTime;
             
             this.log(`Analysis subagent completed in ${duration}ms`);
