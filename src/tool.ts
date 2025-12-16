@@ -107,13 +107,53 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
+     * Helper to get a chat model
+     */
+    private async getModel(token: vscode.CancellationToken): Promise<vscode.LanguageModelChat> {
+        // Try to find a GPT-4 model from Copilot first
+        let models = await vscode.lm.selectChatModels({ vendor: 'copilot', family: 'gpt-4' });
+
+        // Fallback to any Copilot model
+        if (models.length === 0) {
+            models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+        }
+
+        // Fallback to any model
+        if (models.length === 0) {
+            models = await vscode.lm.selectChatModels({});
+        }
+
+        if (models.length === 0) {
+            throw new Error('No language models available. Please ensure GitHub Copilot Chat is installed and active.');
+        }
+
+        return models[0];
+    }
+
+    /**
+     * Helper to send a request to the model and get text
+     */
+    private async sendRequest(
+        model: vscode.LanguageModelChat,
+        messages: vscode.LanguageModelChatMessage[],
+        token: vscode.CancellationToken
+    ): Promise<string> {
+        const response = await model.sendRequest(messages, {}, token);
+        let text = '';
+        for await (const fragment of response.text) {
+            text += fragment;
+        }
+        return text;
+    }
+
+    /**
      * Main invoke method - orchestrates the entire optimization process
      */
     async invoke(
         options: vscode.LanguageModelToolInvocationOptions<IPromptOptimizerParameters>,
         token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        const { task, iterations = 20, context } = options.input;
+        const { task, iterations = 3, context } = options.input;
         
         this.log('=== Starting Prompt Optimization ===');
         this.log('Task:', task);
@@ -143,7 +183,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
                 task,
                 context,
                 currentPromptVariations,
-                options.toolInvocationToken,
                 token
             );
             
@@ -158,7 +197,6 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const analysis = await this.analyzeResults(
                 task,
                 results,
-                options.toolInvocationToken,
                 token
             );
             
@@ -196,16 +234,28 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
-     * Run 5 subagents in parallel using vscode.lm.invokeTool('runSubagent')
+     * Run 5 subagents in parallel using selected chat model
      */
     private async runSubagentsInParallel(
         task: string,
         context: string | undefined,
         promptVariations: typeof PROMPT_VARIATION_TEMPLATES,
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<SubagentResult[]> {
         
+        // Select model once (or per request, but once is usually fine)
+        let model: vscode.LanguageModelChat;
+        try {
+            model = await this.getModel(token);
+        } catch (error) {
+             return promptVariations.map(v => ({
+                promptVariation: v.name,
+                actualPrompt: '',
+                result: `Error: ${error instanceof Error ? error.message : String(error)}`,
+                success: false
+            }));
+        }
+
         // Create 5 parallel subagent invocations
         const subagentPromises = promptVariations.map(async (variation, index) => {
             const basePrompt = variation.template(task, context);
@@ -215,22 +265,9 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const startTime = Date.now();
             
             try {
-                // Use lm.invokeTool to call the runSubagent tool
-                // Pass toolInvocationToken to show progress in chat UI
-                const result = await vscode.lm.invokeTool(
-                    'runSubagent',
-                    {
-                        input: {
-                            prompt: fullPrompt,
-                            description: `Subagent ${index + 1}: ${variation.name} approach`
-                        },
-                        toolInvocationToken
-                    },
-                    token
-                );
+                const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
+                const resultText = await this.sendRequest(model, messages, token);
 
-                // Extract text from the result
-                const resultText = this.extractTextFromResult(result);
                 const duration = Date.now() - startTime;
                 
                 this.log(`Subagent ${index + 1} (${variation.name}) completed in ${duration}ms`);
@@ -263,12 +300,11 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
-     * Analyze the results from all subagents using another subagent
+     * Analyze the results from all subagents using the model
      */
     private async analyzeResults(
         originalTask: string,
         results: SubagentResult[],
-        toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
         token: vscode.CancellationToken
     ): Promise<AnalysisResult> {
         
@@ -305,20 +341,10 @@ Consider:
         const startTime = Date.now();
 
         try {
-            // Pass toolInvocationToken to show progress in chat UI
-            const analysisResult = await vscode.lm.invokeTool(
-                'runSubagent',
-                {
-                    input: {
-                        prompt: analysisPrompt,
-                        description: 'Analysis subagent: Evaluating results'
-                    },
-                    toolInvocationToken
-                },
-                token
-            );
+            const model = await this.getModel(token);
+            const messages = [vscode.LanguageModelChatMessage.User(analysisPrompt)];
+            const analysisText = await this.sendRequest(model, messages, token);
 
-            const analysisText = this.extractTextFromResult(analysisResult);
             const duration = Date.now() - startTime;
             
             this.log(`Analysis subagent completed in ${duration}ms`);
@@ -327,13 +353,23 @@ Consider:
             // Try to parse the JSON response
             try {
                 // Extract JSON from the response (handle cases where there's extra text)
-                const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]) as AnalysisResult;
-                    this.log('Successfully parsed analysis JSON:', parsed);
-                    return parsed;
+                // Look for code blocks or just finding the outer braces
+                let jsonStr = analysisText;
+
+                // Regex to find JSON block ```json ... ``` or just {...}
+                const codeBlockMatch = analysisText.match(/```json\s*(\{[\s\S]*?\})\s*```/);
+                if (codeBlockMatch) {
+                    jsonStr = codeBlockMatch[1];
+                } else {
+                    const braceMatch = analysisText.match(/\{[\s\S]*\}/);
+                    if (braceMatch) {
+                        jsonStr = braceMatch[0];
+                    }
                 }
-                this.log('No JSON found in analysis response');
+
+                const parsed = JSON.parse(jsonStr) as AnalysisResult;
+                this.log('Successfully parsed analysis JSON:', parsed);
+                return parsed;
             } catch (parseError) {
                 this.log('Failed to parse analysis JSON:', parseError);
             }
@@ -388,21 +424,6 @@ Consider:
 
         this.log('New variation names:', newVariations.map(v => v.name));
         return newVariations;
-    }
-
-    /**
-     * Extract text content from a LanguageModelToolResult
-     */
-    private extractTextFromResult(result: vscode.LanguageModelToolResult): string {
-        const textParts: string[] = [];
-        
-        for (const part of result.content) {
-            if (part instanceof vscode.LanguageModelTextPart) {
-                textParts.push(part.value);
-            }
-        }
-        
-        return textParts.join('\n');
     }
 
     /**

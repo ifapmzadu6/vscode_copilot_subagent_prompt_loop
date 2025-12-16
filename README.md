@@ -130,7 +130,7 @@ npm run lint
 ## 要件
 
 - VS Code 1.100.0以上
-- GitHub Copilot Chat拡張機能（`runSubagent`ツールを使用するため）
+- GitHub Copilot Chat拡張機能
 
 ## ライセンス
 
