@@ -39,7 +39,9 @@
               "description": "Optional additional context to provide to the subagents."
             }
           },
-          "required": ["task"]
+          "required": [
+            "task"
+          ]
         },
         "userDescription": "Runs multiple AI subagents in parallel with different prompts, analyzes which produces the best results, and iteratively optimizes the prompts to find the most effective approach."
       }
@@ -49,14 +51,18 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test": "npm run compile && node out/test/index.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.100.0",
+    "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
+    "@types/vscode": "^1.100.0",
     "@typescript-eslint/eslint-plugin": "^8.28.0",
     "@typescript-eslint/parser": "^8.28.0",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.23.0",
+    "mocha": "^11.7.5",
     "typescript": "^5.8.2"
   }
 }
