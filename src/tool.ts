@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { extractJson } from './utils';
 
 /**
  * Interface for the tool's input parameters
@@ -113,7 +114,7 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
         options: vscode.LanguageModelToolInvocationOptions<IPromptOptimizerParameters>,
         token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        const { task, iterations = 20, context } = options.input;
+        const { task, iterations = 3, context } = options.input;
         
         this.log('=== Starting Prompt Optimization ===');
         this.log('Task:', task);
@@ -196,7 +197,7 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
     }
 
     /**
-     * Run 5 subagents in parallel using vscode.lm.invokeTool('runSubagent')
+     * Run 5 subagents in parallel using internal LLM call
      */
     private async runSubagentsInParallel(
         task: string,
@@ -215,22 +216,8 @@ export class SubagentPromptOptimizerTool implements vscode.LanguageModelTool<IPr
             const startTime = Date.now();
             
             try {
-                // Use lm.invokeTool to call the runSubagent tool
-                // Pass toolInvocationToken to show progress in chat UI
-                const result = await vscode.lm.invokeTool(
-                    'runSubagent',
-                    {
-                        input: {
-                            prompt: fullPrompt,
-                            description: `Subagent ${index + 1}: ${variation.name} approach`
-                        },
-                        toolInvocationToken
-                    },
-                    token
-                );
-
-                // Extract text from the result
-                const resultText = this.extractTextFromResult(result);
+                // Direct LLM call instead of runSubagent
+                const resultText = await this.callLLM(fullPrompt, token);
                 const duration = Date.now() - startTime;
                 
                 this.log(`Subagent ${index + 1} (${variation.name}) completed in ${duration}ms`);
@@ -305,37 +292,19 @@ Consider:
         const startTime = Date.now();
 
         try {
-            // Pass toolInvocationToken to show progress in chat UI
-            const analysisResult = await vscode.lm.invokeTool(
-                'runSubagent',
-                {
-                    input: {
-                        prompt: analysisPrompt,
-                        description: 'Analysis subagent: Evaluating results'
-                    },
-                    toolInvocationToken
-                },
-                token
-            );
-
-            const analysisText = this.extractTextFromResult(analysisResult);
+            // Direct LLM call
+            const analysisText = await this.callLLM(analysisPrompt, token);
             const duration = Date.now() - startTime;
             
             this.log(`Analysis subagent completed in ${duration}ms`);
             this.log('Raw analysis response:', analysisText.substring(0, 500));
             
-            // Try to parse the JSON response
-            try {
-                // Extract JSON from the response (handle cases where there's extra text)
-                const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]) as AnalysisResult;
-                    this.log('Successfully parsed analysis JSON:', parsed);
-                    return parsed;
-                }
+            const parsed = extractJson<AnalysisResult>(analysisText);
+            if (parsed) {
+                this.log('Successfully parsed analysis JSON:', parsed);
+                return parsed;
+            } else {
                 this.log('No JSON found in analysis response');
-            } catch (parseError) {
-                this.log('Failed to parse analysis JSON:', parseError);
             }
         } catch (error) {
             const duration = Date.now() - startTime;
@@ -351,6 +320,41 @@ Consider:
             promptImprovements: [],
             nextPromptSuggestions: []
         };
+    }
+
+    /**
+     * Helper to call LLM directly
+     */
+    private async callLLM(
+        prompt: string,
+        token: vscode.CancellationToken
+    ): Promise<string> {
+        // Prioritize 'copilot' and 'gpt-4'
+        const models = await vscode.lm.selectChatModels({
+            vendor: 'copilot',
+            family: 'gpt-4'
+        });
+
+        // Fallback
+        const model = models[0]
+            ?? (await vscode.lm.selectChatModels({ family: 'gpt-4' }))[0]
+            ?? (await vscode.lm.selectChatModels({}))[0];
+
+        if (!model) {
+            throw new Error('No chat model available');
+        }
+
+        const messages = [
+            vscode.LanguageModelChatMessage.User(prompt)
+        ];
+
+        const response = await model.sendRequest(messages, {}, token);
+
+        let text = '';
+        for await (const fragment of response.text) {
+            text += fragment;
+        }
+        return text;
     }
 
     /**
